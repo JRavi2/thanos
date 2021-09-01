@@ -5,11 +5,11 @@ package storepb
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/gogo/protobuf/types"
 	"github.com/pkg/errors"
@@ -38,24 +38,6 @@ func NewSeriesResponse(series *Series) *SeriesResponse {
 	return &SeriesResponse{
 		Result: &SeriesResponse_Series{
 			Series: series,
-		},
-	}
-}
-
-func NewSeriesResponseWithPool(series *Series, respPool *sync.Pool) *SeriesResponse {
-	return &SeriesResponse{
-		respPool: respPool,
-		Result: &SeriesResponse_Series{
-			Series: series,
-		},
-	}
-}
-
-func NewHintsSeriesResponseWithPool(hints *types.Any, respPool *sync.Pool) *SeriesResponse {
-	return &SeriesResponse{
-		respPool: respPool,
-		Result: &SeriesResponse_Hints{
-			Hints: hints,
 		},
 	}
 }
@@ -476,137 +458,61 @@ func LabelsToPromLabelsUnsafe(lset []Label) labels.Labels {
 	return labelpb.ZLabelsToPromLabels(lset)
 }
 
-// Type alias because protoc-go-inject-field does not support
-// managing imports.
-type syncPool = sync.Pool
-
-// Close returns the memory used for marshaling, if any.
-func (m *SeriesResponse) Close() {
-	if m == nil || m.respBuf == nil {
-		return
+// XORNumSamples return number of samples. Returns 0 if it's not XOR chunk.
+func (m *Chunk) XORNumSamples() int {
+	if m.Type == Chunk_XOR {
+		return int(binary.BigEndian.Uint16(m.Data))
 	}
-
-	m.respPool.Put(m.respBuf)
-	m.respBuf = nil
+	return 0
 }
 
-// The following were copied/pasted from gogoprotobuf generated code with changes
-// to make it work with sync.Pool / []byte slice.
-func (m *SeriesResponse) Marshal() (dAtA []byte, err error) {
-	size := m.Size()
+type SeriesStatsCounter struct {
+	lastSeriesHash uint64
 
-	var respBuf []byte
+	Series  int
+	Chunks  int
+	Samples int
+}
 
-	// No pool defined, allocate directly.
-	if m.respPool == nil {
-		respBuf = make([]byte, size)
-	} else {
-		if m.respBuf == nil {
-			poolBuf := m.respPool.Get()
-			if poolBuf == nil {
-				respBuf = make([]byte, size)
-				m.respBuf = &respBuf
-			} else {
-				m.respBuf = poolBuf.(*[]byte)
-				respBuf = *m.respBuf
-			}
-		} else {
-			if cap(*m.respBuf) < size {
-				if m.respPool != nil {
-					m.respPool.Put(m.respBuf)
-				}
-				respBuf = make([]byte, size)
-				m.respBuf = &respBuf
-			} else {
-				respBuf = *m.respBuf
-			}
+func (c *SeriesStatsCounter) CountSeries(seriesLabels []labelpb.ZLabel) {
+	seriesHash := labelpb.HashWithPrefix("", seriesLabels)
+	if c.lastSeriesHash != 0 || seriesHash != c.lastSeriesHash {
+		c.lastSeriesHash = seriesHash
+		c.Series++
+	}
+}
+
+func (c *SeriesStatsCounter) Count(series *Series) {
+	c.CountSeries(series.Labels)
+	for _, chk := range series.Chunks {
+		if chk.Raw != nil {
+			c.Chunks++
+			c.Samples += chk.Raw.XORNumSamples()
+		}
+
+		if chk.Count != nil {
+			c.Chunks++
+			c.Samples += chk.Count.XORNumSamples()
+		}
+
+		if chk.Counter != nil {
+			c.Chunks++
+			c.Samples += chk.Counter.XORNumSamples()
+		}
+
+		if chk.Max != nil {
+			c.Chunks++
+			c.Samples += chk.Max.XORNumSamples()
+		}
+
+		if chk.Min != nil {
+			c.Chunks++
+			c.Samples += chk.Min.XORNumSamples()
+		}
+
+		if chk.Sum != nil {
+			c.Chunks++
+			c.Samples += chk.Sum.XORNumSamples()
 		}
 	}
-
-	marshalBuf := respBuf[:size]
-	n, err := m.MarshalToSizedBuffer(marshalBuf)
-	if err != nil {
-		return nil, err
-	}
-	return marshalBuf[len(marshalBuf)-n:], nil
-}
-
-func (m *SeriesResponse) MarshalTo(dAtA []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(dAtA[:size])
-}
-
-type marshaler interface {
-	MarshalTo([]byte) (int, error)
-}
-
-func (m *SeriesResponse) MarshalToSizedBuffer(data []byte) (int, error) {
-	i := len(data)
-
-	if m.Result != nil {
-		size := m.Result.Size()
-		i -= size
-
-		if _, err := m.Result.(marshaler).MarshalTo(data[i:]); err != nil {
-			return 0, err
-		}
-	}
-	return len(data) - i, nil
-}
-
-func (m *SeriesResponse_Series) MarshalTo(data []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(data[:size])
-}
-
-func (m *SeriesResponse_Series) MarshalToSizedBuffer(data []byte) (int, error) {
-	i := len(data)
-	if m.Series != nil {
-		{
-			size, err := m.Series.MarshalToSizedBuffer(data[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintRpc(data, i, uint64(size))
-		}
-		i--
-		data[i] = 0xa
-	}
-	return len(data) - i, nil
-}
-func (m *SeriesResponse_Warning) MarshalTo(data []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(data[:size])
-}
-
-func (m *SeriesResponse_Warning) MarshalToSizedBuffer(data []byte) (int, error) {
-	i := len(data)
-	i -= len(m.Warning)
-	copy(data[i:], m.Warning)
-	i = encodeVarintRpc(data, i, uint64(len(m.Warning)))
-	i--
-	data[i] = 0x12
-	return len(data) - i, nil
-}
-func (m *SeriesResponse_Hints) MarshalTo(data []byte) (int, error) {
-	size := m.Size()
-	return m.MarshalToSizedBuffer(data[:size])
-}
-
-func (m *SeriesResponse_Hints) MarshalToSizedBuffer(data []byte) (int, error) {
-	i := len(data)
-	if m.Hints != nil {
-		{
-			size, err := m.Hints.MarshalToSizedBuffer(data[:i])
-			if err != nil {
-				return 0, err
-			}
-			i -= size
-			i = encodeVarintRpc(data, i, uint64(size))
-		}
-		i--
-		data[i] = 0x1a
-	}
-	return len(data) - i, nil
 }
